@@ -966,6 +966,15 @@ function exportExcel() {
 }
 
 // ─── OVERLAY / TOAST ─────────────────────────────────────────────────
+
+function showOverlay(txt) {
+  document.getElementById('overlay-text').textContent = txt || 'Procesando...';
+  document.getElementById('overlay').classList.add('show');
+}
+function hideOverlay() {
+  document.getElementById('overlay').classList.remove('show');
+}
+
 function showToast(msg, type='success') {
   const t = document.getElementById('toast');
   t.textContent = msg; t.className = `toast ${type} show`;
