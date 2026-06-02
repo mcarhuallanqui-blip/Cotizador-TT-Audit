@@ -363,20 +363,26 @@ table.cot-list tbody td input:focus,table.cot-list tbody td select:focus{border-
 <script>
 // ─── STORAGE ──────────────────────────────────────────────────────────
 const SUPABASE_URL = 'https://pcahvqhczgdmpvsitvlo.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBjYWh2cWhjemdkbXB2c2l0dmxvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MjU5MjQsImV4cCI6MjA5NjAwMTkyNH0.UCQ5i2BLPPxFVNKhVMkZiOFk7ARwYs7Rtwso9oj42gA';
+const SUPABASE_KEY = 'sb_publishable_8MtPFfQBDxmDju-MeUmccA_xTkkqsIv';
 
 async function sbFetch(path, opts={}) {
+  const headers = {
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+  };
+  if (opts.prefer) headers['Prefer'] = opts.prefer;
   const r = await fetch(SUPABASE_URL + '/rest/v1/' + path, {
     method: opts.method || 'GET',
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': 'Bearer ' + SUPABASE_KEY,
-      'Content-Type': 'application/json',
-      'Prefer': opts.prefer || ''
-    },
+    headers,
     body: opts.body
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) {
+    const errText = await r.text();
+    console.error('Supabase error:', r.status, errText);
+    throw new Error('HTTP ' + r.status + ': ' + errText);
+  }
   const txt = await r.text();
   return txt ? JSON.parse(txt) : null;
 }
@@ -384,15 +390,27 @@ async function sbFetch(path, opts={}) {
 async function loadFromSupabase() {
   showOverlay('Cargando cotizaciones...');
   try {
-    const data = await sbFetch('cotizaciones?order=fecha_envio_correo.desc&limit=2000');
-    cotizaciones = (data||[]).map(r => ({...r, items: r.items||[]}));
+    // Load in pages to avoid timeout on large datasets
+    let all = [];
+    let from = 0;
+    const pageSize = 500;
+    while (true) {
+      const page = await sbFetch(`cotizaciones?order=fecha_envio_correo.desc&limit=${pageSize}&offset=${from}`);
+      if (!page || page.length === 0) break;
+      all = all.concat(page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+    cotizaciones = all.map(r => ({...r, items: r.items||[]}));
     hideOverlay();
     renderList();
     updateStats();
+    console.log('Loaded', cotizaciones.length, 'cotizaciones from Supabase');
     return cotizaciones;
   } catch(e) {
     hideOverlay();
-    showToast('⚠ Error cargando: ' + e.message, 'error');
+    console.error('Load error:', e);
+    showToast('⚠ Error cargando datos: ' + e.message, 'error');
     return [];
   }
 }
