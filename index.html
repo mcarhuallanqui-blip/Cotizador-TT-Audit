@@ -584,511 +584,70 @@ function validate(data) {
 }
 
 // ─── SUBMIT ───────────────────────────────────────────────────────────
-function submitForm() {
+async function submitForm() {
   const data = gatherData();
   const err  = validate(data);
   if (err) { showToast(err,'error'); return; }
 
-  // Assign correlative number
-  const maxNum = cotizaciones.length > 0 ? Math.max(...cotizaciones.map(c=>c.num||0)) : 0;
-  data.num      = maxNum + 1;
-  data.id       = Date.now();
-  data.created  = new Date().toISOString();
+  if (editingId) {
+    // EDIT existing
+    const idx = cotizaciones.findIndex(c=>c.id===editingId);
+    if (idx < 0) return;
+    const existing = cotizaciones[idx];
+    data.num     = existing.num;
+    data.id      = existing.id;
+    data.created = existing.created;
+    if (data.costo_proyecto <= 0 && existing.costo_proyecto > 0) {
+      data.costo_proyecto = existing.costo_proyecto;
+      data.ppto_con_fee   = existing.ppto_con_fee;
+      data.fee            = existing.fee;
+    }
+    showOverlay('Actualizando...');
+    try {
+      await saveToSupabase(data);
+      cotizaciones[idx] = data;
+      editingId = null;
+      hideOverlay();
+      showToast('✅ Cotización #'+data.num+' actualizada','success');
+      showResultPanel(data);
+    } catch(e) { hideOverlay(); showToast('Error: '+e.message,'error'); }
 
-  cotizaciones.push(data);
-  saveCotizaciones(cotizaciones);
+  } else {
+    // NEW cotizacion
+    const maxNum2 = cotizaciones.filter(c=>!c.is_historico);
+    const maxNum  = maxNum2.length > 0 ? Math.max(...maxNum2.map(c=>c.num||0)) : 0;
+    data.num    = maxNum + 1;
+    data.id     = 0;
+    data.created = new Date().toISOString();
+    showOverlay('Guardando...');
+    try {
+      const saved = await saveToSupabase(data);
+      data.id = saved.id || data.id;
+      cotizaciones.unshift(data);
+      hideOverlay();
+      showToast('✅ Cotización #'+data.num+' guardada','success');
+      showResultPanel(data);
+    } catch(e) { hideOverlay(); showToast('Error guardando: '+e.message,'error'); }
+  }
+}
 
-  // Show results
+function showResultPanel(data) {
   const subtotal = data.costo_proyecto;
   const feeAmt   = subtotal * data.fee;
   const total    = data.ppto_con_fee;
   const fmt = n => 'S/ ' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
   document.getElementById('res-subtotal').textContent = fmt(subtotal);
   document.getElementById('res-fee').textContent      = fmt(feeAmt);
-  document.getElementById('res-fee-pct').textContent  = `Fee ${(data.fee*100).toFixed(1)}%`;
+  document.getElementById('res-fee-pct').textContent  = 'Fee '+(data.fee*100).toFixed(1)+'%';
   document.getElementById('res-total').textContent    = fmt(total);
-  document.getElementById('result-msg').textContent   = `${data.num_cotizacion} · ${data.nombre_proyecto.toUpperCase()} · Fila #${data.num} registrada`;
-
-  // Build PDF blob
+  document.getElementById('result-msg').textContent   = data.num_cotizacion+' · '+(data.nombre_proyecto||'').toUpperCase()+' · Fila #'+data.num;
   const pdfBlob = buildPDFBlob(data, total, feeAmt);
   const pdfUrl  = URL.createObjectURL(pdfBlob);
-  const dlPdf   = document.getElementById('dl-pdf');
-  dlPdf.href    = pdfUrl;
-  dlPdf.download = `Cotizacion_${data.num_cotizacion}.html`;
-
+  document.getElementById('dl-pdf').href     = pdfUrl;
+  document.getElementById('dl-pdf').download = 'Cotizacion_'+data.num_cotizacion+'.html';
   document.getElementById('result-panel').classList.add('show');
   document.getElementById('result-panel').scrollIntoView({behavior:'smooth',block:'start'});
-  showToast('✅ Cotización #' + data.num + ' guardada','success');
 }
-
-// ─── EXPORT EXCEL ────────────────────────────────────────────────────
-function exportExcel() {
-  // Helper: convert "DD/MM/YYYY" string to Excel date value
-  function toExcelDate(str) {
-    if (!str || str.trim() === '') return '';
-    const p = str.split('/');
-    if (p.length !== 3) return str;
-    const d = new Date(parseInt(p[2]), parseInt(p[1])-1, parseInt(p[0]));
-    if (isNaN(d.getTime())) return str;
-    // Excel date serial: days since 1900-01-01 (with leap year bug offset)
-    const epoch = new Date(1899, 11, 30);
-    return Math.round((d - epoch) / 86400000);
-  }
-  if (cotizaciones.length===0) { showToast('No hay cotizaciones para exportar','error'); return; }
-
-  const sorted = [...cotizaciones].sort((a,b)=>(a.num||0)-(b.num||0));
-
-
-
-  // Sheet 1: DETALLE PRESUPUESTOS - exact format of the guide file
-  const headers = [
-    'ENCARGADO','FEE','FECHA ENVÍO CORREO','FECHA EJECUCIÓN','SOLICITANTE',
-    'APROBADO','CORREO','NOMBRE DEL PROYECTO','MES DE FACTURACION',
-    'PPTO CON FEE','COSTO PROYECTO','WBS','NUM PO',
-    'MASSIEL PIDE PO + GUIA','¿DENTRO DE ARCHIVO FACTURACIÓN?','¿FACTURA?','¿BAT LO FACTURO?'
-  ];
-  const rows = sorted.map(c => [
-    (c.encargado||'').toUpperCase(),
-    c.fee || 0.065,
-    toExcelDate(c.fecha_envio_correo),
-    toExcelDate(c.fecha_ejecucion),
-    (c.solicitante||'').toUpperCase(),
-    c.aprobado || '',
-    c.correo || '',
-    (c.nombre_proyecto||'').toUpperCase(),
-    toExcelDate(c.mes_facturacion),
-    c.ppto_con_fee || 0,
-    c.costo_proyecto || 0,
-    c.wbs || '',
-    c.num_po || '',
-    c.massiel_po || '',
-    c.dentro_archivo || '',
-    c.factura || '',
-    c.bat_facturo || ''
-  ]);
-  const wsData = [headers, ...rows];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  ws['!cols'] = [
-    {wch:14},{wch:6},{wch:16},{wch:16},{wch:18},
-    {wch:10},{wch:40},{wch:50},{wch:14},
-    {wch:12},{wch:12},{wch:12},{wch:14},
-    {wch:20},{wch:26},{wch:10},{wch:14}
-  ];
-  ws['!freeze'] = {xSplit:0, ySplit:1};
-  const range = XLSX.utils.decode_range(ws['!ref']);
-  for (let C = range.s.c; C <= range.e.c; C++) {
-    const addr = XLSX.utils.encode_cell({r:0, c:C});
-    if (!ws[addr]) continue;
-    ws[addr].s = {
-      fill: {patternType:'solid', fgColor:{rgb:'0F172A'}},
-      font: {bold:true, color:{rgb:'94A3B8'}, sz:9},
-      alignment: {horizontal:'center', vertical:'center', wrapText:true},
-      border: {top:{style:'thin',color:{rgb:'334155'}},bottom:{style:'medium',color:{rgb:'DC2626'}},left:{style:'thin',color:{rgb:'334155'}},right:{style:'thin',color:{rgb:'334155'}}}
-    };
-  }
-  for (let R = 1; R <= rows.length; R++) {
-    const fillColor = R % 2 === 0 ? 'F1F5F9' : 'FFFFFF';
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const addr = XLSX.utils.encode_cell({r:R, c:C});
-      if (!ws[addr]) ws[addr] = {t:'s', v:''};
-      ws[addr].s = {
-        fill: {patternType:'solid', fgColor:{rgb:fillColor}},
-        font: {sz:9},
-        alignment: {vertical:'center'},
-        border: {top:{style:'thin',color:{rgb:'E2E8F0'}},bottom:{style:'thin',color:{rgb:'E2E8F0'}},left:{style:'thin',color:{rgb:'E2E8F0'}},right:{style:'thin',color:{rgb:'E2E8F0'}}}
-      };
-      if (C===1) { ws[addr].t='n'; ws[addr].z='0.0%'; }
-      if (C===9||C===10) { ws[addr].t='n'; ws[addr].z='"S/"#,##0.00'; }
-      if ((C===2||C===3) && typeof ws[addr].v === 'number') { ws[addr].t='n'; ws[addr].z='DD/MM/YYYY'; }
-      if (C===8 && typeof ws[addr].v === 'number') { ws[addr].t='n'; ws[addr].z='MM/YYYY'; }
-    }
-  }
-  XLSX.utils.book_append_sheet(wb, ws, 'DETALLE PRESUPUESTOS');
-
-  // Second sheet: detalle por encargado con items
-  const byEnc = {};
-  sorted.forEach(c => {
-    const e = (c.encargado||'SIN ASIGNAR').toUpperCase();
-    if (!byEnc[e]) byEnc[e] = [];
-    byEnc[e].push(c);
-  });
-
-  const detRows = [];
-  const encargados = Object.keys(byEnc).sort();
-
-  encargados.forEach(enc => {
-    const cots = byEnc[enc];
-    // Encargado header
-    detRows.push([enc, '', '', '', '', '']);
-    // Sub-header
-    detRows.push(['N° COTIZACIÓN', 'PROYECTO', 'DESCRIPCIÓN ÍTEM', 'CANTIDAD', 'TOTAL SIN FEE (S/)', 'TOTAL CON FEE (S/)']);
-
-    let encSubtotal = 0, encTotal = 0;
-    cots.forEach(c => {
-      const items = c.items || [];
-      const cotSubtotal = c.costo_proyecto || 0;
-      const cotTotal = c.ppto_con_fee || 0;
-      if (items.length === 0) {
-        detRows.push([c.num_cotizacion||'', (c.nombre_proyecto||'').toUpperCase(), '-', '-', cotSubtotal, cotTotal]);
-      } else {
-        items.forEach((item, i) => {
-          detRows.push([
-            i === 0 ? (c.num_cotizacion||'') : '',
-            i === 0 ? (c.nombre_proyecto||'').toUpperCase() : '',
-            item.descripcion || '',
-            item.cantidad || 0,
-            i === 0 ? cotSubtotal : '',
-            i === 0 ? cotTotal : ''
-          ]);
-        });
-      }
-      encSubtotal += cotSubtotal;
-      encTotal += cotTotal;
-    });
-    // Encargado subtotal
-    detRows.push(['', '', '', `TOTAL ${enc} (${cots.length} cot.)`, encSubtotal, encTotal]);
-    detRows.push(['', '', '', '', '', '']); // spacer
-  });
-
-  const ws2 = XLSX.utils.aoa_to_sheet(detRows);
-  ws2['!cols'] = [{wch:18},{wch:40},{wch:40},{wch:12},{wch:18},{wch:18}];
-
-  // Style rows
-  const r2 = XLSX.utils.decode_range(ws2['!ref']);
-  let rowIdx = 0;
-  encargados.forEach(enc => {
-    const cots = byEnc[enc];
-    // Calc how many rows this encargado takes
-    const itemRows = cots.reduce((s,c)=>s+Math.max((c.items||[]).length,1),0);
-    const totalRows = 1 + 1 + itemRows + 1 + 1; // header+subheader+items+total+spacer
-
-    // Style encargado header row
-    for (let C = 0; C <= 5; C++) {
-      const addr = XLSX.utils.encode_cell({r: rowIdx, c: C});
-      if (!ws2[addr]) ws2[addr] = {t:'s', v:''};
-      ws2[addr].s = {
-        fill: {patternType:'solid', fgColor:{rgb:'0F172A'}},
-        font: {bold:true, color:{rgb:'FFFFFF'}, sz:10},
-        alignment: {vertical:'center'}
-      };
-    }
-    // Style sub-header
-    for (let C = 0; C <= 5; C++) {
-      const addr = XLSX.utils.encode_cell({r: rowIdx+1, c: C});
-      if (!ws2[addr]) ws2[addr] = {t:'s', v:''};
-      ws2[addr].s = {
-        fill: {patternType:'solid', fgColor:{rgb:'1E293B'}},
-        font: {bold:true, color:{rgb:'94A3B8'}, sz:8},
-        alignment: {vertical:'center', horizontal:'center'}
-      };
-    }
-    // Style total row
-    const totalRowIdx = rowIdx + 1 + 1 + itemRows;
-    for (let C = 0; C <= 5; C++) {
-      const addr = XLSX.utils.encode_cell({r: totalRowIdx, c: C});
-      if (!ws2[addr]) ws2[addr] = {t:'s', v:''};
-      ws2[addr].s = {
-        fill: {patternType:'solid', fgColor:{rgb:'FEF2F2'}},
-        font: {bold:true, color:{rgb:'DC2626'}, sz:9},
-        border: {top:{style:'thin',color:{rgb:'DC2626'}}}
-      };
-    }
-    // Format money cells in total row
-    for (let C = 4; C <= 5; C++) {
-      const addr = XLSX.utils.encode_cell({r: totalRowIdx, c: C});
-      if (ws2[addr]) { ws2[addr].t='n'; ws2[addr].z='"S/"#,##0.00'; }
-    }
-    rowIdx += totalRows;
-  });
-
-  // Format all money columns in data rows
-  for (let R = 0; R <= r2.e.r; R++) {
-    for (let C = 4; C <= 5; C++) {
-      const addr = XLSX.utils.encode_cell({r:R, c:C});
-      if (ws2[addr] && typeof ws2[addr].v === 'number') {
-        ws2[addr].t = 'n';
-        ws2[addr].z = '"S/"#,##0.00';
-      }
-    }
-  }
-
-  XLSX.utils.book_append_sheet(wb, ws2, 'Detalle por Encargado');
-
-
-
-  XLSX.writeFile(wb, `DETALLE_PRESUPUESTOS_${new Date().getFullYear()}.xlsx`);
-  showToast('✅ Excel descargado con '+rows.length+' cotizaciones','success');
-}
-
-// ─── LIST & SORT ──────────────────────────────────────────────────────
-function clearDateFilter() {
-  document.getElementById('filter-date-from').value = '';
-  document.getElementById('filter-date-to').value = '';
-  renderList();
-}
-
-function parseDate(str) {
-  if (!str) return null;
-  const p = str.split('/');
-  if (p.length === 3) return new Date(parseInt(p[2]), parseInt(p[1])-1, parseInt(p[0]));
-  if (str.includes('-')) return new Date(str);
-  return null;
-}
-
-function sortList(col) {
-  if (sortCol === col) sortDir = sortDir==='asc'?'desc':'asc';
-  else { sortCol = col; sortDir = 'asc'; }
-  renderList();
-}
-
-function renderList() {
-  const q = (document.getElementById('list-search').value||'').toLowerCase();
-  const dateFrom = document.getElementById('filter-date-from')?.value;
-  const dateTo   = document.getElementById('filter-date-to')?.value;
-  const dFrom = dateFrom ? new Date(dateFrom) : null;
-  const dTo   = dateTo   ? new Date(dateTo)   : null;
-
-  let data = cotizaciones.filter(c => {
-    if (q && !(
-      (c.nombre_proyecto||'').toLowerCase().includes(q) ||
-      (c.solicitante||'').toLowerCase().includes(q) ||
-      (c.num_cotizacion||'').toLowerCase().includes(q) ||
-      (c.encargado||'').toLowerCase().includes(q)
-    )) return false;
-    if (dFrom || dTo) {
-      const cDate = parseDate(c.fecha_envio_correo);
-      if (!cDate) return false;
-      if (dFrom && cDate < dFrom) return false;
-      if (dTo   && cDate > dTo)   return false;
-    }
-    return true;
-  });
-
-  // Sort
-  data.sort((a,b) => {
-    let va = a[sortCol], vb = b[sortCol];
-    if (sortCol==='num'||sortCol==='ppto_con_fee'||sortCol==='costo_proyecto') {
-      va = parseFloat(va)||0; vb = parseFloat(vb)||0;
-    } else if (sortCol==='fecha_envio_correo'||sortCol==='fecha_ejecucion') {
-      va = parseDate(va) || new Date(0);
-      vb = parseDate(vb) || new Date(0);
-      va = va.getTime(); vb = vb.getTime();
-    } else {
-      va = (va||'').toString().toLowerCase();
-      vb = (vb||'').toString().toLowerCase();
-    }
-    if (va < vb) return sortDir==='asc'?-1:1;
-    if (va > vb) return sortDir==='asc'?1:-1;
-    return 0;
-  });
-
-  // Update header indicators
-  document.querySelectorAll('table.cot-list thead th').forEach(th => {
-    th.classList.remove('sorted-asc','sorted-desc');
-    if (th.dataset.col === sortCol) th.classList.add('sorted-'+sortDir);
-  });
-
-  const tbody = document.getElementById('list-body');
-  tbody.innerHTML = '';
-  document.getElementById('empty-state').style.display = data.length===0?'block':'none';
-
-  const fmt = n => 'S/ ' + (parseFloat(n)||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
-  const badgeAprobado = v => {
-    if (v==='SI') return '<span class="badge badge-green">SI</span>';
-    if (v==='NO') return '<span class="badge badge-red">NO</span>';
-    return '<span class="badge badge-gray">-</span>';
-  };
-  const badgeFact = v => {
-    if (v==='SI') return '<span class="badge badge-green">SI</span>';
-    if (v==='PENDIENTE') return '<span class="badge badge-yellow">PEND.</span>';
-    return '<span class="badge badge-gray">-</span>';
-  };
-
-  data.forEach(c => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><span class="num-mono" style="font-weight:700;color:${c.id>=1000000?'#94A3B8':'var(--red)'}">${c.id>=1000000?'H':''}${c.num||'-'}</span></td>
-      <td><span class="num-mono">${c.num_cotizacion||''}</span></td>
-      <td>${(c.encargado||"-").toUpperCase()}</td>
-      <td><span class="num-mono" style="font-size:11px;">${c.fecha_envio_correo||'-'}</span></td>
-      <td><span class="num-mono" style="font-size:11px;">${c.fecha_ejecucion||'-'}</span></td>
-      <td style="max-width:180px;font-size:11px;">${(c.nombre_proyecto||'').toUpperCase()}</td>
-      <td><span class="num-mono" style="color:var(--green);font-weight:700;">${fmt(c.ppto_con_fee)}</span></td>
-      <td>${badgeAprobado(c.aprobado)}</td>
-      <td>
-        <select onchange="updateField(${c.id},'factura',this.value)" style="font-size:11px;min-width:70px;">
-          <option value="" ${!c.factura?'selected':''}>-</option>
-          <option value="SI" ${c.factura==='SI'?'selected':''}>SI</option>
-          <option value="NO" ${c.factura==='NO'?'selected':''}>NO</option>
-        </select>
-      </td>
-      <td>
-        <select onchange="updateField(${c.id},'dentro_archivo',this.value)" style="font-size:11px;min-width:80px;">
-          <option value="" ${!c.dentro_archivo?'selected':''}>-</option>
-          <option value="SI" ${c.dentro_archivo==='SI'?'selected':''}>SI</option>
-          <option value="PENDIENTE" ${c.dentro_archivo==='PENDIENTE'?'selected':''}>PENDIENTE</option>
-          <option value="NO" ${c.dentro_archivo==='NO'?'selected':''}>NO</option>
-        </select>
-      </td>
-      <td>
-        <div class="action-cell">
-          <button class="btn-icon" onclick="editCot(${c.id})" title="Editar">✏️</button>
-          <button class="btn-icon del" onclick="deleteCot(${c.id})" title="Eliminar">🗑</button>
-        </div>
-      </td>`;
-    tbody.appendChild(tr);
-  });
-  updateStats();
-}
-
-function updateField(id, field, value) {
-  const idx = cotizaciones.findIndex(c=>c.id===id);
-  if (idx<0) return;
-  cotizaciones[idx][field] = value;
-  updateFieldSupabase(id, field, value).catch(e => showToast('Error: '+e.message,'error'));
-}
-
-function deleteCot(id) {
-  if (!confirm('¿Eliminar esta cotización?')) return;
-  deleteFromSupabase(id).then(() => {
-    cotizaciones = cotizaciones.filter(c=>c.id!==id);
-    renderList();
-    updateStats();
-    showToast('Cotización eliminada','success');
-  }).catch(e => showToast('Error: '+e.message,'error'));
-}
-
-function editCot(id) {
-  const c = cotizaciones.find(x=>x.id===id);
-  if (!c) return;
-  showPage('page-form');
-  document.getElementById('num_cotizacion').value = c.num_cotizacion||'';
-  document.getElementById('encargado').value      = c.encargado||'';
-  document.getElementById('nombre_proyecto').value= c.nombre_proyecto||'';
-  document.getElementById('solicitante').value    = c.solicitante||'';
-  document.getElementById('aprobado').value       = c.aprobado||'';
-  document.getElementById('correo').value         = c.correo||'';
-  document.getElementById('observaciones').value  = c.observaciones||'';
-  document.getElementById('num_po').value         = c.num_po||'';
-  document.getElementById('wbs').value            = c.wbs||'';
-  document.getElementById('massiel_po').value     = c.massiel_po||'';
-  document.getElementById('dentro_archivo').value = c.dentro_archivo||'';
-  document.getElementById('factura').value        = c.factura||'';
-  document.getElementById('bat_facturo').value    = c.bat_facturo||'';
-  // dates
-  const parseDateIn = v => { if(!v) return ''; const p=v.split('/'); return p.length===3?`${p[2]}-${p[1]}-${p[0]}`:''; };
-  const parseMonthIn = v => { if(!v) return ''; const p=v.split('/'); return p.length===2?`${p[1]}-${p[0]}`:''; };
-  document.getElementById('fecha_envio_correo').value = parseDateIn(c.fecha_envio_correo);
-  document.getElementById('fecha_ejecucion').value    = parseDateIn(c.fecha_ejecucion);
-  document.getElementById('mes_facturacion').value    = parseMonthIn(c.mes_facturacion);
-  // fee
-  const feeMap = {'0.065':'0.065','0.017':'0.017','0.06':'0.06','0.10':'0.10'};
-  const feeKey = String(c.fee);
-  if (feeMap[feeKey]) document.getElementById('fee').value = feeKey;
-  else { document.getElementById('fee').value='custom'; document.getElementById('fee_custom').value=((c.fee||0)*100).toFixed(1); }
-  // items
-  document.getElementById('items-body').innerHTML = '';
-  itemCounter = 0;
-  const itemsToLoad = c.items||[];
-  itemsToLoad.forEach((item, i) => {
-    addItem();
-    const sid = itemCounter;
-    const sItem = item;
-    setTimeout(() => {
-      const dEl = document.getElementById('desc-' + sid);
-      const qEl = document.getElementById('qty-'  + sid);
-      const uEl = document.getElementById('unit-' + sid);
-      if (dEl) dEl.value = sItem.descripcion||'';
-      if (qEl) qEl.value = sItem.cantidad||1;
-      if (uEl) uEl.value = sItem.precio_unitario||0;
-      calcRow(sid);
-    }, 50);
-  });
-  if ((c.items||[]).length===0) {
-    addItem();
-    // Use costo_proyecto if available, otherwise back-calculate from ppto_con_fee / (1 + fee)
-    let costo = parseFloat(c.costo_proyecto) || 0;
-    if (costo <= 0 && c.ppto_con_fee > 0) {
-      const fee = parseFloat(c.fee) || 0.065;
-      costo = c.ppto_con_fee / (1 + fee);
-    }
-    const snapId   = itemCounter;
-    const snapName = (c.nombre_proyecto || 'Servicio').toUpperCase();
-    const snapCosto = costo;
-    setTimeout(() => {
-      const dEl = document.getElementById('desc-' + snapId);
-      const qEl = document.getElementById('qty-'  + snapId);
-      const uEl = document.getElementById('unit-' + snapId);
-      if (dEl) dEl.value = snapName;
-      if (qEl) qEl.value = 1;
-      if (uEl) uEl.value = snapCosto > 0 ? snapCosto.toFixed(2) : '0';
-      calcRow(snapId);
-    }, 50);
-  }
-  // Mark as editing (replace on save)
-  editingId = id;
-  updateCotNum();
-  showToast('Editando cotización #'+c.num,'success');
-}
-
-// Override submit to handle editing
-const _origSubmit = submitForm;
-window.submitForm = function() {
-  const data = gatherData();
-  const err  = validate(data);
-  if (err) { showToast(err,'error'); return; }
-  if (editingId) {
-    const idx = cotizaciones.findIndex(c=>c.id===editingId);
-    if (idx>=0) {
-      const existing = cotizaciones[idx];
-      data.num     = existing.num;
-      data.id      = existing.id;
-      data.created = existing.created;
-      // Preserve original financial data if no items were entered
-      if (data.costo_proyecto <= 0 && existing.costo_proyecto > 0) {
-        data.costo_proyecto = existing.costo_proyecto;
-        data.ppto_con_fee   = existing.ppto_con_fee;
-        data.fee            = existing.fee;
-      }
-      showOverlay('Actualizando...');
-      saveToSupabase(data).then(() => {
-        cotizaciones[idx] = data;
-        editingId = null;
-        hideOverlay();
-        showToast('✅ Cotización #'+data.num+' actualizada','success');
-      }).catch(e => { hideOverlay(); showToast('Error: '+e.message,'error'); });
-    }
-  } else {
-    const maxNum2 = cotizaciones.filter(c=>!c.is_historico); const maxNum = maxNum2.length>0 ? Math.max(...maxNum2.map(c=>c.num||0)) : 0;
-    data.num    = maxNum + 1;
-    data.id     = 0;
-    data.created= new Date().toISOString();
-    showOverlay('Guardando...');
-    saveToSupabase(data).then(saved => {
-      data.id = saved.id;
-      cotizaciones.unshift(data);
-      hideOverlay();
-      showToast('✅ Cotización #'+data.num+' guardada','success');
-      const subtotal = data.costo_proyecto;
-      const feeAmt   = subtotal * data.fee;
-      const total    = data.ppto_con_fee;
-      const fmt = n => 'S/ ' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
-      document.getElementById('res-subtotal').textContent = fmt(subtotal);
-      document.getElementById('res-fee').textContent      = fmt(feeAmt);
-      document.getElementById('res-fee-pct').textContent  = `Fee ${(data.fee*100).toFixed(1)}%`;
-      document.getElementById('res-total').textContent    = fmt(total);
-      document.getElementById('result-msg').textContent   = `${data.num_cotizacion} · ${(data.nombre_proyecto||'').toUpperCase()} · Fila #${data.num}`;
-      const pdfBlob = buildPDFBlob(data, total, feeAmt);
-      const pdfUrl  = URL.createObjectURL(pdfBlob);
-      const dlPdf   = document.getElementById('dl-pdf');
-      dlPdf.href    = pdfUrl;
-      dlPdf.download = `Cotizacion_${data.num_cotizacion}.html`;
-      document.getElementById('result-panel').classList.add('show');
-      document.getElementById('result-panel').scrollIntoView({behavior:'smooth',block:'start'});
-    }).catch(e => { hideOverlay(); showToast('Error guardando: '+e.message,'error'); });
-  }
-};
 
 // ─── STATS ────────────────────────────────────────────────────────────
 function updateStats() {
